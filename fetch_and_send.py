@@ -69,6 +69,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 STATE_PATH = os.path.join(os.path.dirname(__file__), "state", "seen_ids.json")
+STATE_RETENTION_DAYS = int(os.environ.get("STATE_RETENTION_DAYS", "30"))
 TELEGRAM_MSG_LIMIT = 3500  # stay comfortably under Telegram's 4096 char cap
 
 HEADERS = {
@@ -85,21 +86,40 @@ session.headers.update(HEADERS)
 # ----------------------------------------------------------------------
 
 def load_seen():
+    """Returns {item_id: iso_timestamp_last_seen}. Transparently migrates the
+    old flat-list format from earlier versions of this script."""
     if not os.path.exists(STATE_PATH):
-        return set()
+        return {}
     with open(STATE_PATH, "r", encoding="utf-8") as f:
         try:
-            return set(json.load(f))
+            data = json.load(f)
         except json.JSONDecodeError:
-            return set()
+            return {}
+
+    if isinstance(data, list):
+        # Old format: a bare list of ids with no timestamps. Stamp them as
+        # "now" so they still get a full retention window before pruning.
+        now = datetime.now(timezone.utc).isoformat()
+        return {item_id: now for item_id in data}
+
+    return data
 
 
-def save_seen(seen_ids):
+def save_seen(seen_map):
+    """Prune anything older than STATE_RETENTION_DAYS, then write to disk."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_RETENTION_DAYS)
+    pruned = {}
+    for item_id, ts in seen_map.items():
+        try:
+            seen_at = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue  # drop anything with a corrupt timestamp
+        if seen_at >= cutoff:
+            pruned[item_id] = ts
+
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    # Keep the state file from growing forever — retain the most recent 5000 ids
-    trimmed = list(seen_ids)[-5000:]
     with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(trimmed, f)
+        json.dump(pruned, f, indent=2, sort_keys=True)
 
 
 # ----------------------------------------------------------------------
@@ -200,21 +220,32 @@ def fetch_rss(feed_url, hours, source_name="feed"):
     if parsed.bozo and not parsed.entries:
         print(f"[warn] {source_name}: feed did not parse cleanly ({parsed.bozo_exception})", file=sys.stderr)
 
+    used_full_content = 0
     for entry in parsed.entries:
         published = entry.get("published_parsed") or entry.get("updated_parsed")
         if published:
             pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
             if pub_dt < cutoff:
                 continue
+        # Prefer full content:encoded if the feed includes it — it's already
+        # in this same response, no extra request needed — since the plain
+        # `summary` field is often just a thin, sometimes unhelpful teaser.
+        content_field = entry.get("content")
+        if content_field and content_field[0].get("value"):
+            body = content_field[0]["value"]
+            used_full_content += 1
+        else:
+            body = entry.get("summary", entry.get("description", ""))
+
         entries.append({
             "title": entry.get("title", "").strip(),
             "link": entry.get("link", ""),
             "id": entry.get("id", entry.get("link", entry.get("title", ""))),
-            "summary": smart_truncate(strip_html(entry.get("summary", entry.get("description", ""))), 420),
+            "summary": smart_truncate(strip_html(body), 420),
         })
 
     print(f"[info] {source_name}: {len(entries)} item(s) in the last {hours}h "
-          f"(feed had {len(parsed.entries)} total)")
+          f"(feed had {len(parsed.entries)} total, {used_full_content} used full content)")
     return entries
 
 
@@ -232,7 +263,13 @@ def strip_html(text):
     text = re.sub(r"&#39;|&rsquo;", "'", text)
     text = re.sub(r"&quot;", '"', text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text
+    # Strip common feed-teaser boilerplate that adds no information
+    text = re.sub(r"\s*The post .+? appeared first on .+?\.?\s*$", "", text)
+    text = re.sub(r"\s*Continue reading.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*Read (the full story|more)\.?\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*\[…\]\s*$", "", text)
+    text = re.sub(r"\s*\.\.\.\s*$", "", text)
+    return text.strip()
 
 
 def smart_truncate(text, limit):
@@ -343,7 +380,11 @@ def send_telegram(text):
 
 def main():
     seen = load_seen()
-    new_seen = set(seen)
+    new_seen = dict(seen)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    print(f"Loaded state: {len(seen)} previously-seen item(s) "
+          f"(retention: {STATE_RETENTION_DAYS} days).")
 
     print("Fetching CISA KEV list...")
     kev_ids = fetch_kev_ids()
@@ -352,7 +393,7 @@ def main():
     all_cves = fetch_recent_cves(LOOKBACK_HOURS, MIN_CVSS_SCORE, kev_ids)
     new_cves = [c for c in all_cves if c["id"] not in seen]
     for c in new_cves:
-        new_seen.add(c["id"])
+        new_seen[c["id"]] = now_iso
 
     print("Fetching security news feeds...")
     new_security = []
@@ -360,7 +401,7 @@ def main():
         for entry in fetch_rss(url, LOOKBACK_HOURS, source):
             if entry["id"] in seen:
                 continue
-            new_seen.add(entry["id"])
+            new_seen[entry["id"]] = now_iso
             new_security.append({**entry, "source": source})
 
     print("Fetching AI feeds...")
@@ -369,7 +410,7 @@ def main():
         for entry in fetch_rss(url, LOOKBACK_HOURS, source):
             if entry["id"] in seen:
                 continue
-            new_seen.add(entry["id"])
+            new_seen[entry["id"]] = now_iso
             new_ai.append({**entry, "source": source})
 
     print("Fetching general tech feeds...")
@@ -378,11 +419,13 @@ def main():
         for entry in fetch_rss(url, LOOKBACK_HOURS, source):
             if entry["id"] in seen:
                 continue
-            new_seen.add(entry["id"])
+            new_seen[entry["id"]] = now_iso
             new_tech.append({**entry, "source": source})
 
     if not new_cves and not new_security and not new_ai and not new_tech:
         print("Nothing new since last run. Skipping Telegram send.")
+        # Still worth pruning stale entries even on a quiet run.
+        save_seen(new_seen)
         return
 
     sections = build_sections(new_cves, new_security, new_ai, new_tech)
