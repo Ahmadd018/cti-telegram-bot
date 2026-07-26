@@ -38,7 +38,7 @@ import requests
 # How far back to look each run. Should be a bit *longer* than your
 # schedule interval so a slow run or a missed trigger doesn't lose items.
 # Twice-daily digest -> 12h between runs, so we look back 18h for safety.
-LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "18"))
+LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "72"))
 
 # Minimum CVSS v3 base score to include (7.0 = High threshold)
 MIN_CVSS_SCORE = float(os.environ.get("MIN_CVSS_SCORE", "7.0"))
@@ -231,6 +231,22 @@ def fetch_rss(feed_url, hours, source_name="feed"):
     if parsed.bozo and not parsed.entries:
         print(f"[warn] {source_name}: feed did not parse cleanly ({parsed.bozo_exception})", file=sys.stderr)
 
+    # Diagnostic: how old is the newest entry in this feed, regardless of
+    # whether it passes our lookback filter? If this is way older than
+    # expected for an active outlet, the feed itself is stale (CDN caching,
+    # etc.) rather than our filtering being wrong.
+    all_dates = []
+    for e in parsed.entries:
+        p = e.get("published_parsed") or e.get("updated_parsed")
+        if p:
+            all_dates.append(datetime(*p[:6], tzinfo=timezone.utc))
+    if all_dates:
+        newest = max(all_dates)
+        age_h = (datetime.now(timezone.utc) - newest).total_seconds() / 3600
+        print(f"[info] {source_name}: newest entry in feed is {age_h:.1f}h old ({newest.isoformat()})")
+    else:
+        print(f"[info] {source_name}: no dated entries found in feed at all")
+
     used_full_content = 0
     for entry in parsed.entries:
         published = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -250,7 +266,7 @@ def fetch_rss(feed_url, hours, source_name="feed"):
             "title": entry.get("title", "").strip(),
             "link": entry.get("link", ""),
             "id": entry.get("id", entry.get("link", entry.get("title", ""))),
-            "summary": extract_summary(strip_html(body), 380),
+            "summary": smart_truncate(strip_html(body), 380),
         })
 
     print(f"[info] {source_name}: {len(entries)} item(s) in the last {hours}h "
