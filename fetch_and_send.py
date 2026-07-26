@@ -266,11 +266,13 @@ def chunk_message(text, limit=TELEGRAM_MSG_LIMIT):
 
 
 def send_telegram(text):
+    """Returns True only if every chunk was accepted by Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[error] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set", file=sys.stderr)
         sys.exit(1)
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    all_ok = True
     for chunk in chunk_message(text):
         resp = session.post(url, data={
             "chat_id": TELEGRAM_CHAT_ID,
@@ -280,7 +282,9 @@ def send_telegram(text):
         }, timeout=30)
         if resp.status_code != 200:
             print(f"[error] Telegram send failed: {resp.status_code} {resp.text}", file=sys.stderr)
+            all_ok = False
         time.sleep(1)  # be gentle with Telegram's rate limits
+    return all_ok
 
 
 # ----------------------------------------------------------------------
@@ -329,7 +333,6 @@ def main():
 
     if not new_cves and not new_security and not new_ai:
         print("Nothing new since last run. Skipping Telegram send.")
-        save_seen(new_seen)
         return
 
     sections = build_sections(new_cves, new_security, new_ai)
@@ -338,10 +341,14 @@ def main():
     full_message = header + "\n\n" + "\n\n".join(sections)
 
     print(f"Sending digest: {len(new_cves)} CVEs, {len(new_security)} security items, {len(new_ai)} AI items.")
-    send_telegram(full_message)
+    delivered = send_telegram(full_message)
 
-    save_seen(new_seen)
-    print("Done.")
+    if delivered:
+        save_seen(new_seen)
+        print("Done.")
+    else:
+        print("[warn] Send failed — NOT marking these items as seen, so they'll retry next run.", file=sys.stderr)
+        sys.exit(1)  # make the Action show red, so failures aren't silently missed
 
 
 if __name__ == "__main__":
