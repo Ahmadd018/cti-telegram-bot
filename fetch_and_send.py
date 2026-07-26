@@ -231,7 +231,7 @@ def build_sections(new_cves, new_security, new_ai):
         for c in new_cves:
             tag = "🔥 EXPLOITED" if c["kev"] else f"CVSS {c['score']}"
             title = escape_md(c["desc"][:180])
-            lines.append(f"• *{escape_md(c['id'])}* \\({escape_md(tag)}\\)\n  {title}\n  {c['url']}")
+            lines.append(f"• *{escape_md(c['id'])}* \\({escape_md(tag)}\\)\n  {title}\n  [NVD advisory]({c['url']})")
         sections.append("\n\n".join(lines))
 
     if new_security:
