@@ -2,10 +2,11 @@ name: CTI Digest
 
 on:
   schedule:
-    # Runs at 05:00 and 17:00 UTC (~09:00 / 21:00 Baku time).
-    # Adjust these two values if you want different times — cron is always UTC.
-    - cron: "0 5 * * *"
-    - cron: "0 17 * * *"
+    # Runs at 02:00 and 09:00 UTC (6:00 AM / 1:00 PM Azerbaijan time, UTC+4, no DST).
+    # Cron is always UTC — if you ever want different local times, tell me the
+    # Baku time and I'll recompute these.
+    - cron: "0 2 * * *"
+    - cron: "0 9 * * *"
   workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
 
 permissions:
