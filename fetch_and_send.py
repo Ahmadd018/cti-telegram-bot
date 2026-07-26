@@ -49,25 +49,21 @@ SECURITY_NEWS_FEEDS = {
     "Krebs on Security": "https://krebsonsecurity.com/feed/",
     "Dark Reading": "https://www.darkreading.com/rss.xml",
     "PortSwigger Research": "https://portswigger.net/research/rss",
+    "The Record": "https://therecord.media/feed/",
+    "SecurityWeek": "https://www.securityweek.com/feed/",
 }
 
-# AI-dedicated feeds: everything here is included, no keyword filtering needed
-AI_DEDICATED_FEEDS = {
+# AI-dedicated feeds: official lab announcements, always included as-is
+AI_FEEDS = {
     "OpenAI": "https://openai.com/news/rss.xml",
     "Google DeepMind": "https://deepmind.google/blog/feed/basic/",
 }
 
-# General tech feeds: only kept if they mention an AI/tech keyword below,
-# since these sites cover far more than AI.
-GENERAL_TECH_FEEDS = {
+# General tech feeds: broader "what's changing in tech" coverage, unfiltered
+TECH_FEEDS = {
     "The Verge": "https://www.theverge.com/rss/index.xml",
     "Ars Technica": "https://feeds.arstechnica.com/arstechnica/index",
 }
-AI_KEYWORDS = [
-    "openai", "anthropic", "claude", "gpt", "llm", "deepmind", "gemini",
-    "chatgpt", "mistral", "meta ai", "copilot", "artificial intelligence",
-    "machine learning", " ai ", "ai model", "ai chip", "nvidia",
-]
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -75,7 +71,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STATE_PATH = os.path.join(os.path.dirname(__file__), "state", "seen_ids.json")
 TELEGRAM_MSG_LIMIT = 3500  # stay comfortably under Telegram's 4096 char cap
 
-HEADERS = {"User-Agent": "cti-telegram-bot/1.0 (+https://github.com/)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; CTI-Digest-Bot/1.0; +https://github.com/)",
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -186,36 +185,69 @@ def fetch_recent_cves(hours, min_score, kev_ids):
 # RSS fetching
 # ----------------------------------------------------------------------
 
-def fetch_rss(feed_url, hours):
+def fetch_rss(feed_url, hours, source_name="feed"):
     """Return entries from a feed published within the last `hours`."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     entries = []
     try:
-        parsed = feedparser.parse(feed_url)
-        for entry in parsed.entries:
-            published = entry.get("published_parsed") or entry.get("updated_parsed")
-            if published:
-                pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
-                if pub_dt < cutoff:
-                    continue
-            entries.append({
-                "title": entry.get("title", "").strip(),
-                "link": entry.get("link", ""),
-                "id": entry.get("id", entry.get("link", entry.get("title", ""))),
-            })
+        resp = session.get(feed_url, timeout=20)
+        resp.raise_for_status()
+        parsed = feedparser.parse(resp.content)
     except Exception as e:
-        print(f"[warn] Could not fetch RSS {feed_url}: {e}", file=sys.stderr)
+        print(f"[warn] Could not fetch {source_name} ({feed_url}): {e}", file=sys.stderr)
+        return entries
+
+    if parsed.bozo and not parsed.entries:
+        print(f"[warn] {source_name}: feed did not parse cleanly ({parsed.bozo_exception})", file=sys.stderr)
+
+    for entry in parsed.entries:
+        published = entry.get("published_parsed") or entry.get("updated_parsed")
+        if published:
+            pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
+            if pub_dt < cutoff:
+                continue
+        entries.append({
+            "title": entry.get("title", "").strip(),
+            "link": entry.get("link", ""),
+            "id": entry.get("id", entry.get("link", entry.get("title", ""))),
+            "summary": smart_truncate(strip_html(entry.get("summary", entry.get("description", ""))), 420),
+        })
+
+    print(f"[info] {source_name}: {len(entries)} item(s) in the last {hours}h "
+          f"(feed had {len(parsed.entries)} total)")
     return entries
-
-
-def matches_ai_keywords(title):
-    t = f" {title.lower()} "
-    return any(kw in t for kw in AI_KEYWORDS)
 
 
 # ----------------------------------------------------------------------
 # Formatting + Telegram delivery
 # ----------------------------------------------------------------------
+
+def strip_html(text):
+    """Turn an RSS summary's HTML into plain, readable text."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)          # drop tags
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&#39;|&rsquo;", "'", text)
+    text = re.sub(r"&quot;", '"', text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def smart_truncate(text, limit):
+    """Truncate to `limit` chars, preferring to end on a sentence, else a word, plus an ellipsis."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    sentence_end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if sentence_end > limit * 0.4:  # only use it if it's not too early in the string
+        return cut[:sentence_end + 1]
+    word_end = cut.rfind(" ")
+    if word_end > 0:
+        cut = cut[:word_end]
+    return cut.rstrip(".,;: ") + "…"
+
 
 def escape_md(text):
     """Escape text for Telegram MarkdownV2."""
@@ -223,28 +255,46 @@ def escape_md(text):
     return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
 
 
-def build_sections(new_cves, new_security, new_ai):
+def build_sections(new_cves, new_security, new_ai, new_tech):
     sections = []
 
     if new_cves:
         lines = ["🚨 *High/Critical CVEs*"]
         for c in new_cves:
             tag = "🔥 EXPLOITED" if c["kev"] else f"CVSS {c['score']}"
-            title = escape_md(c["desc"][:180])
-            lines.append(f"• *{escape_md(c['id'])}* \\({escape_md(tag)}\\)\n  {title}\n  [NVD advisory]({c['url']})")
+            desc = escape_md(smart_truncate(c["desc"], 400))
+            lines.append(f"• *{escape_md(c['id'])}* \\({escape_md(tag)}\\)\n  {desc}\n  [NVD advisory]({c['url']})")
         sections.append("\n\n".join(lines))
 
     if new_security:
         lines = ["📰 *Security News*"]
         for s in new_security:
-            lines.append(f"• [{escape_md(s['title'])}]({s['link']})  \\-  _{escape_md(s['source'])}_")
-        sections.append("\n".join(lines))
+            entry_lines = [f"• *{escape_md(s['title'])}*  \\-  _{escape_md(s['source'])}_"]
+            if s["summary"]:
+                entry_lines.append(f"  {escape_md(s['summary'])}")
+            entry_lines.append(f"  [Read more]({s['link']})")
+            lines.append("\n".join(entry_lines))
+        sections.append("\n\n".join(lines))
 
     if new_ai:
-        lines = ["🤖 *AI & Tech*"]
+        lines = ["🤖 *AI Updates*"]
         for a in new_ai:
-            lines.append(f"• [{escape_md(a['title'])}]({a['link']})  \\-  _{escape_md(a['source'])}_")
-        sections.append("\n".join(lines))
+            entry_lines = [f"• *{escape_md(a['title'])}*  \\-  _{escape_md(a['source'])}_"]
+            if a["summary"]:
+                entry_lines.append(f"  {escape_md(a['summary'])}")
+            entry_lines.append(f"  [Read more]({a['link']})")
+            lines.append("\n".join(entry_lines))
+        sections.append("\n\n".join(lines))
+
+    if new_tech:
+        lines = ["💻 *Tech Updates*"]
+        for t in new_tech:
+            entry_lines = [f"• *{escape_md(t['title'])}*  \\-  _{escape_md(t['source'])}_"]
+            if t["summary"]:
+                entry_lines.append(f"  {escape_md(t['summary'])}")
+            entry_lines.append(f"  [Read more]({t['link']})")
+            lines.append("\n".join(entry_lines))
+        sections.append("\n\n".join(lines))
 
     return sections
 
@@ -307,40 +357,41 @@ def main():
     print("Fetching security news feeds...")
     new_security = []
     for source, url in SECURITY_NEWS_FEEDS.items():
-        for entry in fetch_rss(url, LOOKBACK_HOURS):
+        for entry in fetch_rss(url, LOOKBACK_HOURS, source):
             if entry["id"] in seen:
                 continue
             new_seen.add(entry["id"])
             new_security.append({**entry, "source": source})
 
-    print("Fetching AI/tech feeds...")
+    print("Fetching AI feeds...")
     new_ai = []
-    for source, url in AI_DEDICATED_FEEDS.items():
-        for entry in fetch_rss(url, LOOKBACK_HOURS):
+    for source, url in AI_FEEDS.items():
+        for entry in fetch_rss(url, LOOKBACK_HOURS, source):
             if entry["id"] in seen:
                 continue
             new_seen.add(entry["id"])
             new_ai.append({**entry, "source": source})
 
-    for source, url in GENERAL_TECH_FEEDS.items():
-        for entry in fetch_rss(url, LOOKBACK_HOURS):
+    print("Fetching general tech feeds...")
+    new_tech = []
+    for source, url in TECH_FEEDS.items():
+        for entry in fetch_rss(url, LOOKBACK_HOURS, source):
             if entry["id"] in seen:
                 continue
-            if not matches_ai_keywords(entry["title"]):
-                continue
             new_seen.add(entry["id"])
-            new_ai.append({**entry, "source": source})
+            new_tech.append({**entry, "source": source})
 
-    if not new_cves and not new_security and not new_ai:
+    if not new_cves and not new_security and not new_ai and not new_tech:
         print("Nothing new since last run. Skipping Telegram send.")
         return
 
-    sections = build_sections(new_cves, new_security, new_ai)
+    sections = build_sections(new_cves, new_security, new_ai, new_tech)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     header = f"🛰 *CTI Digest* \\- {escape_md(now_str)}"
     full_message = header + "\n\n" + "\n\n".join(sections)
 
-    print(f"Sending digest: {len(new_cves)} CVEs, {len(new_security)} security items, {len(new_ai)} AI items.")
+    print(f"Sending digest: {len(new_cves)} CVEs, {len(new_security)} security items, "
+          f"{len(new_ai)} AI items, {len(new_tech)} tech items.")
     delivered = send_telegram(full_message)
 
     if delivered:
