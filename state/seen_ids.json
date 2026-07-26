@@ -1,1 +1,12 @@
-[]
+{
+  "CVE-2026-17496": "2026-07-26T22:25:57.626987+00:00",
+  "CVE-2026-17497": "2026-07-26T22:25:57.626987+00:00",
+  "CVE-2026-57989": "2026-07-26T22:25:57.626987+00:00",
+  "CVE-2026-57990": "2026-07-26T22:25:57.626987+00:00",
+  "CVE-2026-63720": "2026-07-26T22:25:57.626987+00:00",
+  "https://arstechnica.com/culture/2026/07/first-teaser-for-apple-tvs-neuromancer-debuts-at-sdcc/": "2026-07-26T22:25:57.626987+00:00",
+  "https://www.bleepingcomputer.com/news/security/github-pypi-add-time-absed-defenses-against-supply-chain-attacks/": "2026-07-26T22:25:57.626987+00:00",
+  "https://www.theverge.com/?p=970756": "2026-07-26T22:25:57.626987+00:00",
+  "https://www.theverge.com/?p=971097": "2026-07-26T22:25:57.626987+00:00",
+  "https://www.theverge.com/?p=971101": "2026-07-26T22:25:57.626987+00:00"
+}
