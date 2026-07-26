@@ -1,0 +1,40 @@
+name: CTI Digest
+
+on:
+  schedule:
+    # Runs at 05:00 and 17:00 UTC (~09:00 / 21:00 Baku time).
+    # Adjust these two values if you want different times — cron is always UTC.
+    - cron: "0 5 * * *"
+    - cron: "0 17 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated state file
+
+jobs:
+  run-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run digest script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: python fetch_and_send.py
+
+      - name: Commit updated state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update seen-items state"
+          file_pattern: "state/seen_ids.json"
